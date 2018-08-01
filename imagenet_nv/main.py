@@ -1,4 +1,5 @@
 import argparse, os, shutil, time, warnings
+import sys
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -163,16 +164,18 @@ def main():
 
     if args.evaluate: return validate(val_loader, model, criterion, epoch, start_time)
 
-    for epoch in range(args.start_epoch, args.epochs):
+    for epoch in range(args.start_epoch, args.epochs + 5):
+        print(epoch); sys.stdout.flush()
         adjust_learning_rate(optimizer, epoch)
-        if epoch==int(args.epochs*0.4+0.5):
+        if epoch == 0: # epoch==int(args.epochs*0.4+0.5):
             traindir = os.path.join(args.data, 'train')
             valdir = os.path.join(args.data, 'val')
             args.sz = 224
             train_loader,val_loader,train_sampler,val_sampler = get_loaders( traindir, valdir)
-        if epoch==int(args.epochs*0.92+0.5):
+        if epoch == 0: # epoch==int(args.epochs*0.92+0.5):
             args.sz=288
-            args.batch_size=128
+            # args.batch_size=128
+            args.batch_size = 64
             train_loader,val_loader,train_sampler,val_sampler = get_loaders(
                 traindir, valdir, use_val_sampler=False, min_scale=0.5)
 
@@ -180,12 +183,17 @@ def main():
             train_sampler.set_epoch(epoch)
             val_sampler.set_epoch(epoch)
 
+        train_time = time.time()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=UserWarning)
             train(train_loader, model, criterion, optimizer, epoch)
+        train_time = time.time() - train_time
 
         if args.prof: break
+        val_time = time.time()
         prec1 = validate(val_loader, model, criterion, epoch, start_time)
+        val_time = time.time() - val_time
+        print('## %f %f' % (train_time, val_time))
 
         if args.rank == 0:
             is_best = prec1 > best_prec1
@@ -193,7 +201,7 @@ def main():
             save_checkpoint({
                 'epoch': epoch + 1, 'arch': args.arch, 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1, 'optimizer' : optimizer.state_dict(),
-            }, is_best)
+            }, is_best, filename='%s/checkpoint.%d.pth.tar' % (args.save_dir, epoch))
 
 # item() is a recent addition, so this helps with backward compatibility.
 def to_python_float(t):
@@ -239,6 +247,12 @@ def train(train_loader, model, criterion, optimizer, epoch):
     top1 = AverageMeter()
     top5 = AverageMeter()
 
+    total_load_time = 0.
+    total_forward_time = 0.
+    total_acc_time = 0.
+    total_reduce_time = 0.
+    total_back_time = 0.
+
     # switch to train mode
     model.train()
     end = time.time()
@@ -249,26 +263,36 @@ def train(train_loader, model, criterion, optimizer, epoch):
     while input is not None:
         i += 1
         if args.prof and (i > 200): break
-        # measure data loading time
-        data_time.update(time.time() - end)
 
         input_var = Variable(input)
         target_var = Variable(target)
 
+        # measure data loading time
+        tmp = time.time() - end
+        data_time.update(tmp)
+        total_load_time += tmp
+
         # compute output
+        forward_time = time.time()
         output = model(input_var)
         loss = criterion(output, target_var)
+        total_forward_time += time.time() - forward_time
 
         # measure accuracy and record loss
+        acc_time = time.time()
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
+        total_acc_time += time.time() - acc_time
 
+        reduce_time = time.time()
         if args.distributed:
             reduced_loss = reduce_tensor(loss.data)
             prec1 = reduce_tensor(prec1)
             prec5 = reduce_tensor(prec5)
         else:
             reduced_loss = loss.data
+        total_reduce_time += time.time() - reduce_time
 
+        back_time = time.time()
         losses.update(to_python_float(reduced_loss), input.size(0))
         top1.update(to_python_float(prec1), input.size(0))
         top5.update(to_python_float(prec5), input.size(0))
@@ -278,7 +302,12 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         if args.fp16:
             model.zero_grad()
+            print('zero_grad'); sys.stdout.flush()
+            print(loss)
+            print(loss.size())
+            print(loss.type()); sys.stdout.flush()
             loss.backward()
+            print('backward'); sys.stdout.flush()
             set_grad(param_copy, list(model.parameters()))
 
             if args.loss_scale != 1:
@@ -292,6 +321,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+        total_back_time += time.time() - back_time
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -308,6 +338,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
                   'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                    epoch, i, len(train_loader), batch_time=batch_time,
                    data_time=data_time, loss=losses, top1=top1, top5=top5))
+    print('^ %f %f %f %f %f' %
+          (total_load_time, total_forward_time, total_acc_time, total_reduce_time, total_back_time))
 
 
 def validate(val_loader, model, criterion, epoch, start_time):
@@ -315,6 +347,11 @@ def validate(val_loader, model, criterion, epoch, start_time):
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
+
+    total_load_time = 0.
+    total_forward_time = 0.
+    total_acc_time = 0.
+    total_assorted_time = 0.
 
     model.eval()
     end = time.time()
@@ -328,23 +365,30 @@ def validate(val_loader, model, criterion, epoch, start_time):
         target = target.cuda(async=True)
         input_var = Variable(input)
         target_var = Variable(target)
+        total_load_time += time.time() - end
 
+        forward_time = time.time()
         # compute output
         with torch.no_grad():
             output = model(input_var)
             loss = criterion(output, target_var)
+        total_forward_time += time.time() - forward_time
 
-        reduced_loss = reduce_tensor(loss.data)
-
-        # measure accuracy and record loss
+        reduce_time = time.time()
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
+        if args.distributed:
+            reduced_loss = reduce_tensor(loss.data)
+            prec1 = reduce_tensor(prec1)
+            prec5 = reduce_tensor(prec5)
+        else:
+            reduced_loss = loss.data
+        total_forward_time += time.time() - reduce_time
 
-        reduced_prec1 = reduce_tensor(prec1)
-        reduced_prec5 = reduce_tensor(prec5)
-
+        assorted_time = time.time()
         losses.update(to_python_float(reduced_loss), input.size(0))
         top1.update(to_python_float(prec1), input.size(0))
         top5.update(to_python_float(prec5), input.size(0))
+        total_assorted_time = time.time() - assorted_time
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -364,6 +408,9 @@ def validate(val_loader, model, criterion, epoch, start_time):
     time_diff = datetime.now()-start_time
     print(f'~~{epoch}\t{float(time_diff.total_seconds() / 3600.0)}\t{top5.avg:.3f}\n')
     print(' * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'.format(top1=top1, top5=top5))
+
+    print('& %f %f %f %f' %
+          (total_load_time, total_forward_time, total_acc_time, total_assorted_time))
 
     return top1.avg
 
