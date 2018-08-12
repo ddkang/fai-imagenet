@@ -257,15 +257,11 @@ def train(train_loader, model, criterion, optimizer, epoch):
     model.train()
     end = time.time()
 
-    prefetcher = data_prefetcher(train_loader, prefetch=True)
-    input, target = prefetcher.next()
-    i = -1
-    while input is not None:
-        i += 1
-        if args.prof and (i > 200): break
+    for i, (input, target) in enumerate(train_loader):
+        if args.prof and (i > 100): break
 
-        input_var = Variable(input)
-        target_var = Variable(target)
+        input = input.cuda(non_blocking=True)
+        target = target.cuda(non_blocking=True)
 
         # measure data loading time
         tmp = time.time() - end
@@ -274,8 +270,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         # compute output
         forward_time = time.time()
-        output = model(input_var)
-        loss = criterion(output, target_var)
+        output = model(input)
+        loss = criterion(output, target)
         total_forward_time += time.time() - forward_time
 
         # measure accuracy and record loss
@@ -315,8 +311,12 @@ def train(train_loader, model, criterion, optimizer, epoch):
                     param.grad.data = param.grad.data/args.loss_scale
 
             optimizer.step()
+            print("Before copy_in_params...")
             copy_in_params(model, param_copy)
+            print("After copy_in_params...")
             torch.cuda.synchronize()
+            print("In args.fp16...")
+            print(i)
         else:
             optimizer.zero_grad()
             loss.backward()
@@ -327,7 +327,6 @@ def train(train_loader, model, criterion, optimizer, epoch):
         batch_time.update(time.time() - end)
 
         end = time.time()
-        input, target = prefetcher.next()
 
         if args.rank == 0 and i % args.print_freq == 0 and i > 1:
             print('Epoch: [{0}][{1}/{2}]\t'

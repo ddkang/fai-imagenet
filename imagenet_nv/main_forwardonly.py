@@ -78,6 +78,7 @@ def get_parser():
     return parser
 
 cudnn.benchmark = True
+cudnn.verbose = True
 args = get_parser().parse_args()
 
 def get_loaders(traindir, valdir, use_val_sampler=True, min_scale=0.08):
@@ -282,7 +283,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
     i = -1
     while input is not None:
         i += 1
-        if args.prof and (i > 200): break
+        if args.prof and (i > 50): break
 
         input_var = Variable(input)
         target_var = Variable(target)
@@ -322,12 +323,12 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         if args.fp16:
             model.zero_grad()
-            print('zero_grad'); sys.stdout.flush()
-            print(loss)
-            print(loss.size())
-            print(loss.type()); sys.stdout.flush()
+            # print('zero_grad'); sys.stdout.flush()
+            # print(loss)
+            # print(loss.size())
+            # print(loss.type()); sys.stdout.flush()
             loss.backward()
-            print('backward'); sys.stdout.flush()
+            # print('backward'); sys.stdout.flush()
             set_grad(param_copy, list(model.parameters()))
 
             if args.loss_scale != 1:
@@ -381,6 +382,7 @@ def validate(val_loader, model, criterion, epoch, start_time):
     i = -1
     while input is not None:
         i += 1
+        if args.prof and (i > 5): break
 
         target = target.cuda(async=True)
         input_var = Variable(input)
