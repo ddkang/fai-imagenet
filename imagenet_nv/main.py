@@ -261,7 +261,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
     i = -1
     while input is not None:
         i += 1
-        if args.prof and (i > 5): break
+        if args.prof and (i > 25): break
 
         input_var = Variable(input)
         target_var = Variable(target)
