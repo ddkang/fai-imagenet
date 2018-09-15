@@ -22,7 +22,6 @@ from fp16util import network_to_half, set_grad, copy_in_params
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
                      and callable(models.__dict__[name]))
-#print(model_names)
 
 def get_parser():
     parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
@@ -262,7 +261,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
     i = -1
     while input is not None:
         i += 1
-        if args.prof and (i > 200): break
+        if args.prof and (i > 5): break
 
         input_var = Variable(input)
         target_var = Variable(target)
@@ -302,12 +301,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         if args.fp16:
             model.zero_grad()
-            print('zero_grad'); sys.stdout.flush()
-            print(loss)
-            print(loss.size())
-            print(loss.type()); sys.stdout.flush()
             loss.backward()
-            print('backward'); sys.stdout.flush()
             set_grad(param_copy, list(model.parameters()))
 
             if args.loss_scale != 1:
